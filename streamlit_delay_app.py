@@ -3,6 +3,8 @@ import pandas as pd
 import altair as alt
 from difflib import get_close_matches
 
+st.write("App is running with the latest code")
+
 # load data, cached
 @st.cache_data
 def load_data():
@@ -50,33 +52,56 @@ def get_flight_stats(df, airport_code, airline_name):
     }
 
 
-def plot_monthly_delays(df, airport_code, airline_name):
+def plot_monthly_delays(df, airport_code, airline_name, view_type):
     # filter only rows for specific airline/airport
     monthly = df[
         (df['airport'] == airport_code) &
         (df['carrier_name'] == airline_name)
-    ][['month', 'arr_flights', 'arr_del15']]
+    ][['year','month', 'arr_flights', 'arr_del15']]
 
     if monthly.empty:
         st.info("No monthly data available for this combination.")
         return
     
-    # group by month, calculate delay percentage
-    monthly = monthly.groupby('month').sum().reset_index()
-    monthly['delay_percent'] = (monthly['arr_del15'] / monthly['arr_flights']) * 100
+    if view_type == "Average by Month (all years combined)":
+    
+        # group by month, calculate delay percentage
+        monthly = monthly.groupby('month').sum().reset_index()
+        monthly['delay_percent'] = (monthly['arr_del15'] / monthly['arr_flights']) * 100
 
-    # create chart
-    chart = alt.Chart(monthly).mark_line(point=True).encode(
-        x=alt.X('month:O', title='Month'),
-        y=alt.Y('delay_percent:Q', title='Delay %'),
-        tooltip=['month', 'delay_percent']
-    ).properties(
-        title=f"{airline_name} Delay % at {airport_code} (Monthly)",
-        width=600,
-        height=400
-    )
+        # create chart
+        chart = alt.Chart(monthly).mark_line(point=True).encode(
+            x=alt.X('month:O', title='Month'),
+            y=alt.Y('delay_percent:Q', title='Delay %'),
+            tooltip=['month', 'delay_percent']
+        ).properties(
+            title=f"{airline_name} Delay % at {airport_code} (Average by Month, {min_year}-{max_year})",
+            width=600,
+            height=400
+        )
+
+    else: # month by month over years
+        monthly = monthly.groupby(['year', 'month']).sum().reset_index()
+        monthly['delay_percent'] = (monthly['arr_del15'] / monthly['arr_flights']) * 100
+        monthly['date'] = pd.to_datetime(
+            monthly['year'].astype(str) + '-' + monthly['month'].astype(str) + '-01'
+        )
+
+        chart = alt.Chart(monthly).mark_line(point=True).encode(
+            x=alt.X('date:T', title='Date'),
+            y=alt.Y('delay_percent:Q', title='Delay %'),
+            tooltip=['year', 'month', 'delay_percent']
+        ).properties(
+            title=f"{airline_name} Delay % at {airport_code} ({min_year}-{max_year}, Monthly Timeline)",
+            width=600,
+            height=400
+        )
 
     st.altair_chart(chart)
+    if view_type == "Average by Month (all years combined)":
+        st.caption("Average delay % for each calendar month, across all years in the dataset")
+    else:
+        st.caption("Delay % trend shown month by month across years")
 
 def plot_delay_cause_pie(df, airport_code, airline_name):
     filtered = df[
@@ -135,31 +160,57 @@ st.write("Get historical delay rate information")
 all_airlines = df['carrier_name'].unique()
 
 #input
-with st.form("search_form"):
-    airport_input = st.text_input("Enter an airport code (three letters, like LAX):").upper()
-    airline_input = st.text_input("Enter an airline name (such as Delta):")
-    submit = st.form_submit_button(" Search")
+airport_input = st.text_input(
+    "Enter an airport code (three letters, like LAX):",
+    value=st.session_state.get("airport_input", "")
+).upper()
+
+airline_input = st.text_input(
+    "Enter an airline name (such as Delta):",
+    value=st.session_state.get("airline_input", "")
+)
+submit = st.button(" Search")
+
+#save search to session state
+if submit and airport_input and airline_input:
+    st.session_state.airport_input = airport_input
+    st.session_state.airline_input = airline_input
 
 # check to make sure both inputs filled
-if submit and airport_input and airline_input:
-    matched_airline = fuzzy_match_airline(airline_input, all_airlines)
+if "airport_input" in st.session_state and "airline_input" in st.session_state:
+    matched_airline = fuzzy_match_airline(st.session_state.airline_input, all_airlines)
 
     if not matched_airline:
-        st.error( "Could not find a close match for that airline.")
-        st.stop()
-
-    st.success(f" Searched airline: **{matched_airline}**")
-
-    stats = get_flight_stats(df, airport_input, matched_airline)
-
-    if not stats:
-        st.warning(" Nothing found for that airport/airline combination.")
+        st.error("Could not find a close match for that airline.")
     else:
-        st.subheader(f"Results for {matched_airline} at {airport_input}")
-        st.metric("Total Arrivals", stats["total_arrivals"])
-        st.metric("Delayed Flights (15+ min)", stats["total_delays"])
-        st.metric("Percent Delayed", f"{stats['delay_percent']}%")
+        st.success(f" Searched airline: **{matched_airline}**")
 
-        plot_monthly_delays(df, airport_input, matched_airline)
-        plot_delay_cause_pie(df, airport_input, matched_airline)
+        stats = get_flight_stats(df, st.session_state.airport_input, matched_airline)
+
+        if not stats:
+            st.warning("Nothing found for that airport/airline combination")
+        else:
+            st.subheader(f"Results for {matched_airline} at {st.session_state.airport_input}")
+            st.metric("Total Arrivals", stats["total_arrivals"])
+            st.metric("Delayed Flights (15+ min)", stats["total_delays"])
+            st.metric("Percent Delayed", f"{stats['delay_percent']}%")
+
+
+            if "view_type" not in st.session_state:
+                st.session_state.view_type = "Average by Month (all years combined)"
+
+            view_type = st.radio(
+                "Choose how to view monthly delays:",
+                ("Average by Month (all years combined)", "Timeline (month by month over years)"),
+                index=0 if st.session_state.view_type == "Average by Month (all years combined)" else 1,
+                #save user's view choice in session state
+                key="view_type"
+            )
+
+            plot_monthly_delays(df, st.session_state.airport_input, matched_airline, view_type)
+            plot_delay_cause_pie(df, st.session_state.airport_input, matched_airline)
+
+            if st.button("New Search"):
+                st.session_state.clear()
+                st.experimental_rerun()
     
